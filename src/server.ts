@@ -1,10 +1,11 @@
-import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import z from "zod";
 import { db, testDbConnection } from "./db";
 import { todos } from "./db/schema";
 import { eq, ilike } from "drizzle-orm";
+import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
+import express from "express";
 
 interface ITodo {
   id: string;
@@ -287,14 +288,37 @@ const changeStatus = async (params: {
 
 const startServer = async () => {
   await testDbConnection();
-  //   const httpTransport = new StreamableHTTPClientTransport(
-  //     new URL("http://localhost:3001/sse")
-  //   );
 
   const stdioTransport = new StdioServerTransport();
 
-  //   await server.connect(httpTransport);
   await server.connect(stdioTransport);
 };
 
-startServer();
+const app = express();
+
+app.post("/mcp", express.json(), async (req, res) => {
+  try {
+    const httpTransport = new StreamableHTTPServerTransport({
+      sessionIdGenerator: undefined,
+    });
+
+    await server.connect(httpTransport);
+    await httpTransport.handleRequest(req, res, req.body);
+  } catch (error) {
+    console.log(`Error occured: ${error}`);
+    if (!res.headersSent) {
+      res.status(500).json({
+        error: {
+          code: -32603,
+          message: `Internal server error: ${error}`,
+        },
+        id: null,
+        jsonrpc: "2.0",
+      });
+    }
+  }
+});
+
+app.listen(4000, () => {
+  console.log("Server is listening on port 4000");
+});

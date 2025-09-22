@@ -11,6 +11,10 @@
           "type": "node"
         }
       }
+    },
+    "todo-mcp-http-streamable-server": {
+      "url": "http://localhost:4000/mcp",
+      "type": "http"
     }
   },
   "inputs": []
