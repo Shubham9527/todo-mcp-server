@@ -1,11 +1,13 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import z from "zod";
 import { db, testDbConnection } from "./db";
 import { todos } from "./db/schema";
 import { eq, ilike } from "drizzle-orm";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
-import express from "express";
+import express, { Request, Response } from "express";
+import { isInitializeRequest } from "@modelcontextprotocol/sdk/types.js";
+import { randomUUID } from "node:crypto";
+import cors from "cors";
 
 interface ITodo {
   id: string;
@@ -286,39 +288,100 @@ const changeStatus = async (params: {
   }
 };
 
-const startServer = async () => {
-  await testDbConnection();
+//TODO - STDIO transport - commented for reference
+// const startServer = async () => {
+//   await testDbConnection();
 
-  const stdioTransport = new StdioServerTransport();
+//   const stdioTransport = new StdioServerTransport();
 
-  await server.connect(stdioTransport);
-};
+//   await server.connect(stdioTransport);
+// };
 
 const app = express();
+app.use(express.json());
+app.use(
+  cors({
+    origin: "*",
+    exposedHeaders: ["Mcp-Session-Id"],
+    // allowedHeaders: ["Content-Type", "mcp-session-id"],
+    // allowedHeaders: [
+    //   "Content-Type",
+    //   "Accept",
+    //   "Mcp-Session-Id",
+    //   "mcp-session-id",
+    // ],
+    allowedHeaders: ["*"],
+    methods: ["GET", "POST", "DELETE", "OPTIONS"],
+  })
+);
 
-app.post("/mcp", express.json(), async (req, res) => {
-  try {
-    const httpTransport = new StreamableHTTPServerTransport({
-      sessionIdGenerator: undefined,
+// Map to store transports by session ID
+const transports: {
+  [sessionId: string]: StreamableHTTPServerTransport;
+} = {};
+
+app.post("/mcp", async (req, res) => {
+  await testDbConnection();
+  const sessionId = req.headers["mcp-session-id"] as string | undefined;
+  let transport: StreamableHTTPServerTransport;
+
+  if (sessionId && transports[sessionId]) {
+    // Reuse existing transport
+    transport = transports[sessionId];
+  } else if (!sessionId && isInitializeRequest(req.body)) {
+    // New initialization request
+    transport = new StreamableHTTPServerTransport({
+      sessionIdGenerator: () => randomUUID(),
+      onsessioninitialized(sessionId) {
+        transports[sessionId] = transport;
+      },
+      // DNS rebinding protection is disabled by default for backwards compatibility. If you are running this server
+      // locally, make sure to set:
+      // enableDnsRebindingProtection: true,
+      // allowedHosts: ['127.0.0.1'],
+      enableDnsRebindingProtection: true,
+      allowedHosts: [
+        "127.0.0.1",
+        "127.0.0.1:4000",
+        "localhost",
+        "localhost:4000",
+      ],
     });
 
-    await server.connect(httpTransport);
-    await httpTransport.handleRequest(req, res, req.body);
-  } catch (error) {
-    console.log(`Error occured: ${error}`);
-    if (!res.headersSent) {
-      res.status(500).json({
-        error: {
-          code: -32603,
-          message: `Internal server error: ${error}`,
-        },
-        id: null,
-        jsonrpc: "2.0",
-      });
-    }
+    transport.onclose = () => {
+      if (transport.sessionId) {
+        delete transports[transport.sessionId];
+      }
+    };
+
+    await server.connect(transport);
+  } else {
+    res.json(400).json({
+      jsonrpc: "2.0",
+      error: {
+        code: -32000,
+        message: "Bad request: No valid session ID provided",
+      },
+      id: null,
+    });
+    return;
   }
+
+  await transport.handleRequest(req, res, req.body);
 });
 
-app.listen(4000, () => {
-  console.log("Server is listening on port 4000");
-});
+const handleSessionRequest = async (req: Request, res: Response) => {
+  const sessionId = req.headers["mcp-session-id"] as string | undefined;
+  if (!sessionId || !transports[sessionId]) {
+    res.status(400).send("Invalid or Missing session ID");
+    return;
+  }
+
+  const transport = transports[sessionId];
+  await transport.handleRequest(req, res);
+};
+
+app.get("/mcp", handleSessionRequest);
+app.delete("/mcp", handleSessionRequest);
+
+app.listen(4000);
